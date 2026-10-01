@@ -1,6 +1,7 @@
-import os
 import json
 import base64
+import io
+import math
 
 import streamlit as st
 import numpy as np
@@ -16,15 +17,16 @@ from openai import OpenAI
 # ============================================================
 
 st.set_page_config(
-    page_title="Tablero Inteligente",
-    page_icon="🧠",
+    page_title="Nube de Pensamiento",
+    page_icon="💭",
     layout="wide"
 )
 
-st.title("🧠 Tablero Inteligente")
+st.title("💭 Nube de Pensamiento")
+
 st.write(
-    "Dibuja una idea, concepto o esquema y conviértelo automáticamente "
-    "en un mapa mental utilizando inteligencia artificial."
+    "Dibuja libremente tus ideas. La inteligencia artificial "
+    "identificará los conceptos y creará una nube de pensamiento."
 )
 
 
@@ -36,7 +38,6 @@ def encode_image_to_base64(image):
     """
     Convierte una imagen PIL a Base64.
     """
-    import io
 
     buffer = io.BytesIO()
 
@@ -52,16 +53,18 @@ def encode_image_to_base64(image):
 
 def limpiar_json(texto):
     """
-    Intenta extraer un JSON válido de la respuesta del modelo.
+    Limpia posibles bloques Markdown y extrae el JSON.
     """
 
     texto = texto.strip()
 
-    # Eliminar posibles bloques Markdown
-    if texto.startswith("```"):
+    if "```json" in texto:
         texto = texto.replace("```json", "")
+
+    if "```" in texto:
         texto = texto.replace("```", "")
-        texto = texto.strip()
+
+    texto = texto.strip()
 
     inicio = texto.find("{")
     fin = texto.rfind("}")
@@ -72,56 +75,60 @@ def limpiar_json(texto):
     return texto
 
 
+# ============================================================
+# ANALIZAR DIBUJO
+# ============================================================
+
 def analizar_dibujo(client, image):
-    """
-    Envía el dibujo al modelo y solicita una estructura
-    de mapa mental en JSON.
-    """
 
     base64_image = encode_image_to_base64(image)
 
     prompt = """
 Analiza el dibujo realizado por el usuario.
 
-El objetivo es convertir el dibujo en un MAPA MENTAL.
+El usuario está creando una NUBE DE PENSAMIENTO.
 
-Identifica:
+Tu tarea es identificar las ideas, palabras, conceptos y
+relaciones que aparecen en el dibujo.
 
-1. El concepto principal.
-2. Las ideas principales.
-3. Las subideas.
-4. Las relaciones entre las ideas.
+No necesitas interpretar literalmente cada línea del dibujo.
+Concéntrate en detectar conceptos importantes.
 
-No inventes demasiada información.
-Utiliza principalmente lo que pueda observarse o inferirse
-razonablemente del dibujo.
+Devuelve EXCLUSIVAMENTE un JSON válido.
 
-Devuelve EXCLUSIVAMENTE un JSON válido con esta estructura:
+Utiliza exactamente esta estructura:
 
 {
-    "titulo": "Concepto principal",
-    "nodos": [
+    "tema_principal": "Tema principal",
+    "ideas": [
         {
-            "id": "1",
-            "texto": "Idea principal",
+            "id": 1,
+            "texto": "Idea",
+            "importancia": 8,
             "padre": null
         },
         {
-            "id": "2",
+            "id": 2,
             "texto": "Subidea",
-            "padre": "1"
+            "importancia": 5,
+            "padre": 1
         }
     ]
 }
 
-Reglas:
+REGLAS:
 
-- Debe existir un nodo principal.
-- El nodo principal debe tener padre null.
-- Los demás nodos deben indicar el id de su padre.
-- Usa textos cortos.
-- Máximo 20 nodos.
-- No incluyas explicaciones fuera del JSON.
+1. Debe existir un tema principal.
+2. El tema principal debe tener "padre": null.
+3. Las demás ideas deben indicar el ID de la idea relacionada.
+4. "importancia" debe ser un número entre 1 y 10.
+5. Utiliza máximo 20 ideas.
+6. Mantén los textos cortos.
+7. No inventes conceptos que no tengan relación razonable
+   con el dibujo.
+8. Si existen flechas o líneas entre conceptos, intenta
+   utilizarlas para determinar las relaciones.
+9. No escribas explicaciones fuera del JSON.
 """
 
     response = client.chat.completions.create(
@@ -143,120 +150,185 @@ Reglas:
                 ]
             }
         ],
-        max_tokens=2000,
+        max_tokens=2500,
         temperature=0.2
     )
 
     contenido = response.choices[0].message.content
 
     if not contenido:
-        raise ValueError("La IA no devolvió información.")
+        raise ValueError(
+            "La inteligencia artificial no devolvió información."
+        )
 
     contenido = limpiar_json(contenido)
 
     return json.loads(contenido)
 
 
-def construir_mapa_mental(datos):
-    """
-    Construye un mapa mental utilizando matplotlib.
-    """
+# ============================================================
+# CREAR NUBE DE PENSAMIENTO
+# ============================================================
 
-    nodos = datos.get("nodos", [])
+def crear_nube(datos, color_principal, color_secundario):
 
-    if not nodos:
-        st.error("No se encontraron nodos.")
-        return
+    ideas = datos.get("ideas", [])
+
+    if not ideas:
+        return None
 
     # --------------------------------------------------------
-    # Buscar nodo principal
+    # Buscar tema principal
     # --------------------------------------------------------
 
-    nodo_raiz = None
+    principal = None
 
-    for nodo in nodos:
-        if nodo.get("padre") is None:
-            nodo_raiz = nodo
+    for idea in ideas:
+        if idea.get("padre") is None:
+            principal = idea
             break
 
-    if nodo_raiz is None:
-        nodo_raiz = nodos[0]
+    if principal is None:
+        principal = ideas[0]
 
     # --------------------------------------------------------
-    # Construir relaciones padre -> hijos
+    # Crear diccionario
     # --------------------------------------------------------
+
+    ideas_dict = {
+        idea["id"]: idea
+        for idea in ideas
+    }
 
     hijos = {}
 
-    for nodo in nodos:
-        padre = nodo.get("padre")
+    for idea in ideas:
+
+        padre = idea.get("padre")
 
         if padre not in hijos:
             hijos[padre] = []
 
-        hijos[padre].append(nodo)
+        hijos[padre].append(idea)
 
     # --------------------------------------------------------
-    # Calcular posiciones
+    # Posiciones
     # --------------------------------------------------------
 
     posiciones = {}
 
-    posiciones[nodo_raiz["id"]] = (0, 0)
+    posiciones[principal["id"]] = (0, 0)
 
-    # Nodos principales
-    principales = hijos.get(nodo_raiz["id"], [])
+    ideas_principales = hijos.get(
+        principal["id"],
+        []
+    )
 
-    cantidad_principales = len(principales)
+    cantidad = len(ideas_principales)
 
-    if cantidad_principales == 0:
-        cantidad_principales = 1
+    if cantidad == 0:
+        cantidad = 1
 
-    radio_principal = 3.5
+    # --------------------------------------------------------
+    # Colocar ideas principales
+    # --------------------------------------------------------
 
-    for i, nodo in enumerate(principales):
+    radio = 5.0
+
+    for i, idea in enumerate(ideas_principales):
 
         angulo = (
-            2 * np.pi * i / cantidad_principales
+            2 * math.pi * i / cantidad
         )
 
-        x = radio_principal * np.cos(angulo)
-        y = radio_principal * np.sin(angulo)
+        x = radio * math.cos(angulo)
+        y = radio * math.sin(angulo)
 
-        posiciones[nodo["id"]] = (x, y)
+        posiciones[idea["id"]] = (
+            x,
+            y
+        )
 
-        # ----------------------------------------------------
-        # Subnodos
-        # ----------------------------------------------------
+        # --------------------------------------------
+        # Subideas
+        # --------------------------------------------
 
-        subnodos = hijos.get(nodo["id"], [])
+        subideas = hijos.get(
+            idea["id"],
+            []
+        )
 
-        cantidad_sub = len(subnodos)
+        cantidad_sub = len(subideas)
 
         if cantidad_sub == 0:
             continue
 
-        radio_sub = 1.8
+        for j, subidea in enumerate(subideas):
 
-        for j, sub in enumerate(subnodos):
+            separacion = 0.35
 
             angulo_sub = (
                 angulo
-                + (j - (cantidad_sub - 1) / 2)
-                * 0.35
+                +
+                (
+                    j
+                    -
+                    (cantidad_sub - 1) / 2
+                )
+                * separacion
             )
 
-            x2 = x + radio_sub * np.cos(angulo_sub)
-            y2 = y + radio_sub * np.sin(angulo_sub)
+            radio_sub = 2.5
 
-            posiciones[sub["id"]] = (x2, y2)
+            x2 = (
+                x
+                +
+                radio_sub
+                * math.cos(angulo_sub)
+            )
+
+            y2 = (
+                y
+                +
+                radio_sub
+                * math.sin(angulo_sub)
+            )
+
+            posiciones[subidea["id"]] = (
+                x2,
+                y2
+            )
+
+    # --------------------------------------------------------
+    # Ideas que todavía no tengan posición
+    # --------------------------------------------------------
+
+    ids_sin_posicion = [
+        idea["id"]
+        for idea in ideas
+        if idea["id"] not in posiciones
+    ]
+
+    for i, idea_id in enumerate(ids_sin_posicion):
+
+        angulo = (
+            2 * math.pi * i / max(
+                len(ids_sin_posicion),
+                1
+            )
+        )
+
+        posiciones[idea_id] = (
+            7 * math.cos(angulo),
+            7 * math.sin(angulo)
+        )
 
     # --------------------------------------------------------
     # Crear figura
     # --------------------------------------------------------
 
     fig, ax = plt.subplots(
-        figsize=(14, 9)
+        figsize=(15, 9)
     )
 
     ax.set_facecolor("#F8FAFC")
@@ -265,88 +337,118 @@ def construir_mapa_mental(datos):
     # Dibujar conexiones
     # --------------------------------------------------------
 
-    for nodo in nodos:
+    for idea in ideas:
 
-        padre = nodo.get("padre")
+        padre = idea.get("padre")
 
         if padre is None:
             continue
 
-        if nodo["id"] not in posiciones:
+        if idea["id"] not in posiciones:
             continue
 
         if padre not in posiciones:
             continue
 
         x1, y1 = posiciones[padre]
-        x2, y2 = posiciones[nodo["id"]]
+        x2, y2 = posiciones[idea["id"]]
 
+        # Línea
         ax.plot(
             [x1, x2],
             [y1, y2],
-            color="#94A3B8",
+            color="#CBD5E1",
             linewidth=2,
+            alpha=0.8,
             zorder=1
         )
 
     # --------------------------------------------------------
-    # Dibujar nodos
+    # Dibujar burbujas
     # --------------------------------------------------------
 
-    for nodo in nodos:
+    for idea in ideas:
 
-        if nodo["id"] not in posiciones:
+        idea_id = idea["id"]
+
+        if idea_id not in posiciones:
             continue
 
-        x, y = posiciones[nodo["id"]]
+        x, y = posiciones[idea_id]
 
-        es_raiz = nodo["id"] == nodo_raiz["id"]
+        importancia = idea.get(
+            "importancia",
+            5
+        )
 
-        if es_raiz:
+        # ----------------------------------------------------
+        # Tamaño
+        # ----------------------------------------------------
 
-            color = "#2563EB"
-            tamaño = 2500
+        if idea_id == principal["id"]:
+
+            size = 5000
+            color = color_principal
+
+        elif importancia >= 8:
+
+            size = 3000
+            color = "#8B5CF6"
+
+        elif importancia >= 5:
+
+            size = 2200
+            color = color_secundario
 
         else:
 
-            color = "#10B981"
-            tamaño = 1500
+            size = 1500
+            color = "#94A3B8"
+
+        # ----------------------------------------------------
+        # Burbuja
+        # ----------------------------------------------------
 
         ax.scatter(
             x,
             y,
-            s=tamaño,
+            s=size,
             color=color,
+            alpha=0.90,
             edgecolors="white",
             linewidths=3,
             zorder=2
         )
 
+        # ----------------------------------------------------
+        # Texto
+        # ----------------------------------------------------
+
         ax.text(
             x,
             y,
-            nodo["texto"],
+            idea["texto"],
             ha="center",
             va="center",
-            color="white",
-            fontsize=10,
+            fontsize=10 if idea_id != principal["id"] else 13,
             fontweight="bold",
+            color="white",
             wrap=True,
             zorder=3
         )
 
     # --------------------------------------------------------
-    # Configuración visual
+    # Título
     # --------------------------------------------------------
 
     titulo = datos.get(
-        "titulo",
-        "Mapa mental"
+        "tema_principal",
+        "Nube de pensamiento"
     )
 
     ax.set_title(
-        f"🧠 {titulo}",
-        fontsize=20,
+        f"💭 {titulo}",
+        fontsize=22,
         fontweight="bold",
         pad=20
     )
@@ -366,28 +468,36 @@ with st.sidebar:
 
     st.header("⚙️ Configuración")
 
-    st.subheader("📐 Tamaño")
+    # --------------------------------------------------------
+    # Tamaño
+    # --------------------------------------------------------
+
+    st.subheader("📐 Tamaño del tablero")
 
     canvas_width = st.slider(
         "Ancho",
-        min_value=300,
-        max_value=1200,
-        value=700,
-        step=50
+        300,
+        1200,
+        700,
+        50
     )
 
     canvas_height = st.slider(
         "Alto",
-        min_value=200,
-        max_value=800,
-        value=450,
-        step=50
+        250,
+        800,
+        450,
+        50
     )
 
-    st.subheader("🎨 Apariencia")
+    # --------------------------------------------------------
+    # Colores
+    # --------------------------------------------------------
+
+    st.subheader("🎨 Colores")
 
     background_color = st.color_picker(
-        "Color del fondo",
+        "Fondo",
         "#FFFFFF"
     )
 
@@ -396,40 +506,62 @@ with st.sidebar:
         "#000000"
     )
 
+    st.subheader("🖌️ Lápiz")
+
     stroke_width = st.slider(
-        "Grosor del lápiz",
-        min_value=1,
-        max_value=30,
-        value=5
+        "Grosor",
+        1,
+        30,
+        5
     )
+
+    # --------------------------------------------------------
+    # Colores de la nube
+    # --------------------------------------------------------
+
+    st.subheader("💭 Nube")
+
+    cloud_main_color = st.color_picker(
+        "Color principal",
+        "#2563EB"
+    )
+
+    cloud_secondary_color = st.color_picker(
+        "Color secundario",
+        "#10B981"
+    )
+
+    # --------------------------------------------------------
+    # API
+    # --------------------------------------------------------
 
     st.divider()
 
-    st.subheader("🔑 OpenAI")
+    st.subheader("🔑 Inteligencia artificial")
 
     api_key = st.text_input(
-        "API Key",
-        type="password",
-        help="Introduce tu clave de OpenAI."
+        "OpenAI API Key",
+        type="password"
     )
 
     st.divider()
 
-    st.info(
-        "Dibuja un concepto, esquema o mapa de ideas. "
-        "Después presiona 'Crear mapa mental'."
+    st.caption(
+        "Dibuja palabras, círculos, flechas y conexiones. "
+        "La IA intentará convertir tu dibujo en una nube "
+        "de pensamiento organizada."
     )
 
 
 # ============================================================
-# CANVAS
+# TABLERO
 # ============================================================
 
-st.subheader("🎨 Dibuja tu idea")
+st.subheader("✏️ Dibuja tus pensamientos")
 
 canvas_result = st_canvas(
 
-    fill_color="rgba(0, 0, 0, 0)",
+    fill_color="rgba(0,0,0,0)",
 
     stroke_width=stroke_width,
 
@@ -443,57 +575,64 @@ canvas_result = st_canvas(
 
     drawing_mode="freedraw",
 
-    key="canvas"
+    key="thinking_canvas"
 )
 
 
 # ============================================================
-# BOTÓN
+# BOTONES
 # ============================================================
 
-col1, col2 = st.columns([1, 4])
+col1, col2 = st.columns([1, 1])
 
 with col1:
 
     analizar = st.button(
-        "🧠 Crear mapa mental",
+        "💭 Crear nube de pensamiento",
         type="primary",
         use_container_width=True
     )
 
+with col2:
+
+    limpiar = st.button(
+        "🗑️ Limpiar resultado",
+        use_container_width=True
+    )
+
+
+if limpiar:
+
+    if "nube" in st.session_state:
+        del st.session_state["nube"]
+
+    st.rerun()
+
 
 # ============================================================
-# PROCESAMIENTO
+# ANALIZAR
 # ============================================================
 
 if analizar:
 
-    # --------------------------------------------------------
-    # Validar API Key
-    # --------------------------------------------------------
-
     if not api_key:
 
         st.error(
-            "Introduce tu API Key en el menú lateral."
+            "Introduce tu API Key en el panel lateral."
         )
 
         st.stop()
-
-    # --------------------------------------------------------
-    # Validar dibujo
-    # --------------------------------------------------------
 
     if canvas_result.image_data is None:
 
         st.warning(
-            "Primero realiza un dibujo."
+            "Primero dibuja algo en el tablero."
         )
 
         st.stop()
 
     # --------------------------------------------------------
-    # Crear cliente
+    # Cliente
     # --------------------------------------------------------
 
     client = OpenAI(
@@ -501,40 +640,40 @@ if analizar:
     )
 
     # --------------------------------------------------------
-    # Convertir canvas a imagen
+    # Imagen
     # --------------------------------------------------------
 
-    input_numpy_array = np.array(
+    image_array = np.array(
         canvas_result.image_data
     )
 
-    input_image = Image.fromarray(
-        input_numpy_array.astype("uint8"),
+    image = Image.fromarray(
+        image_array.astype("uint8"),
         "RGBA"
     )
 
     # --------------------------------------------------------
-    # Mostrar proceso
+    # IA
     # --------------------------------------------------------
 
     with st.spinner(
-        "🧠 Analizando tu dibujo..."
+        "🧠 Analizando tus pensamientos..."
     ):
 
         try:
 
-            mapa = analizar_dibujo(
+            resultado = analizar_dibujo(
                 client,
-                input_image
+                image
             )
 
-            st.session_state["mapa"] = mapa
+            st.session_state["nube"] = resultado
 
         except json.JSONDecodeError:
 
             st.error(
-                "La IA no devolvió un JSON válido. "
-                "Intenta nuevamente."
+                "No fue posible interpretar la respuesta "
+                "de la IA. Intenta nuevamente."
             )
 
         except Exception as e:
@@ -545,32 +684,29 @@ if analizar:
 
 
 # ============================================================
-# MOSTRAR RESULTADO
+# RESULTADO
 # ============================================================
 
-if "mapa" in st.session_state:
+if "nube" in st.session_state:
 
-    mapa = st.session_state["mapa"]
+    datos = st.session_state["nube"]
 
     st.divider()
 
-    st.subheader("🧠 Mapa mental generado")
-
-    # --------------------------------------------------------
-    # Información
-    # --------------------------------------------------------
+    st.subheader("💭 Tu nube de pensamiento")
 
     st.write(
-        f"**Concepto principal:** "
-        f"{mapa.get('titulo', 'Sin título')}"
+        f"### {datos.get('tema_principal', 'Sin título')}"
     )
 
     # --------------------------------------------------------
-    # Mostrar gráfico
+    # Gráfico
     # --------------------------------------------------------
 
-    figura = construir_mapa_mental(
-        mapa
+    figura = crear_nube(
+        datos,
+        cloud_main_color,
+        cloud_secondary_color
     )
 
     if figura:
@@ -581,28 +717,52 @@ if "mapa" in st.session_state:
         )
 
     # --------------------------------------------------------
-    # Mostrar estructura
+    # Ideas detectadas
+    # --------------------------------------------------------
+
+    st.subheader("🧠 Ideas detectadas")
+
+    ideas = datos.get(
+        "ideas",
+        []
+    )
+
+    for idea in ideas:
+
+        importancia = idea.get(
+            "importancia",
+            5
+        )
+
+        st.write(
+            f"**{idea['texto']}** "
+            f"— importancia: {importancia}/10"
+        )
+
+    # --------------------------------------------------------
+    # JSON
     # --------------------------------------------------------
 
     with st.expander(
-        "🔍 Ver estructura detectada"
+        "🔍 Ver información generada por la IA"
     ):
 
-        st.json(mapa)
+        st.json(datos)
 
     # --------------------------------------------------------
-    # Descargar JSON
+    # Descargar
     # --------------------------------------------------------
 
-    json_descarga = json.dumps(
-        mapa,
+    json_data = json.dumps(
+        datos,
         ensure_ascii=False,
         indent=4
     )
 
     st.download_button(
-        label="⬇️ Descargar mapa mental",
-        data=json_descarga,
-        file_name="mapa_mental.json",
+        "⬇️ Descargar nube",
+        data=json_data,
+        file_name="nube_pensamiento.json",
         mime="application/json"
     )
+
